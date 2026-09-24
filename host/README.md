@@ -1,42 +1,163 @@
-# host
+# 主机安全数字孪生中心 V2
 
-This template should help get you started developing with Vue 3 in Vite.
+这是一个基于 Vue 3、TypeScript、Vite 和 Three.js 的主机安全可视化大屏项目。页面整体按 1672 × 941 的设计稿还原，并根据浏览器窗口自动等比缩放，适合在大屏、投影或普通桌面浏览器中查看。
 
-## Recommended IDE Setup
+## 1. 项目概览
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+页面以“主机安全数字孪生”为核心，将主机资产、风险、机房位置、探针状态和安全事件放在同一个可视化界面中：
 
-## Recommended Browser Setup
+- **顶部总览指标**：主机总数、在线/离线主机、风险主机、待处理告警、今日安全事件、安全评分。
+- **左侧统计面板**：主机风险分布、操作系统分布、业务组/机房分布。
+- **中央机房视图**：Three.js 实体机房、楼层与分区切换、主机卡片、自动巡检和多种视图模式。
+- **右侧运营面板**：近 7 天告警趋势、高风险主机 TOP 5、探针状态。
+- **底部事件流**：实时安全事件列表，支持按风险等级和事件类型筛选，并保留自动刷新与动画暂停能力。
 
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
+## 2. 快速开始
 
-## Type Support for `.vue` Imports in TS
+### 环境要求
 
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
+- Node.js：建议使用 `22.18.0` 或 `24.12.0` 及以上版本。
+- 包管理器：项目当前使用 npm，并已生成 `package-lock.json`。
+- 浏览器：需要支持 WebGL 的现代浏览器，例如 Chrome 或 Edge。
 
-## Customize configuration
+### 安装依赖
 
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
-pnpm install
-```
-
-### Compile and Hot-Reload for Development
+在 `host` 目录执行：
 
 ```sh
-pnpm dev
+npm install
 ```
 
-### Type-Check, Compile and Minify for Production
+### 启动开发服务
 
 ```sh
-pnpm build
+npm run dev
 ```
+
+启动后访问终端输出的地址，默认通常为：
+
+```text
+http://localhost:5173/
+```
+
+### 类型检查与生产构建
+
+```sh
+npm run build
+```
+
+该命令会先执行 `vue-tsc` 类型检查，再执行 Vite 生产打包。构建结果输出到 `dist/` 目录。
+
+### 只执行类型检查
+
+```sh
+npm run type-check
+```
+
+### 本地预览生产包
+
+```sh
+npm run preview
+```
+
+## 3. 核心功能说明
+
+### 3.1 顶部指标
+
+顶部指标来自 `src/data/hostSecurity.ts` 中的演示数据。每个指标会同时显示当前值、与昨日相比的变化率和增减数量，便于快速判断安全态势变化。
+
+### 3.2 风险与分布图表
+
+左侧面板通过 SVG 展示统计结果：
+
+- 风险分布使用环形图，颜色对应安全、低危、中危、高危、严重五档。
+- 操作系统与业务组分布使用条形图，并显示数量和占比。
+
+这些图表由 Vue 响应式数据驱动，不依赖额外图表库。
+
+### 3.3 实体机房视图
+
+中央区域由 `src/components/dashboard/MachineRoomScene.vue` 实现，主要能力包括：
+
+- 程序化生成机房地面、背景机柜、灯光、光流和机柜设备。
+- 根据当前楼层与分区过滤展示机柜。
+- 支持实体机房、主机拓扑、风险定位、资源监控、探针状态五种视图。
+- 支持点击机柜标签或 3D 机柜选择主机。
+- 支持楼层切换、业务域切换、设备切换和自动巡检。
+- 选中主机后展示主机名称、IP、在线状态、CPU、内存、心跳和告警数量。
+
+如果浏览器无法启用 WebGL，页面会显示友好提示。此时请检查浏览器硬件加速设置。
+
+### 3.4 安全事件流
+
+底部表格展示安全事件，包括发生时间、主机、IP、事件类型、风险等级、描述和处理状态。
+
+可用筛选条件：
+
+- 风险等级：全部、严重、高危、中危、低危、安全。
+- 事件类型：从当前事件数据中自动生成。
+
+“自动刷新”开启时，演示数据会定期新增一条异常登录事件；“暂停动画”会同时停止巡检和演示数据模拟。
+
+## 4. 目录结构
+
+```text
+host/
+├─ index.html                        # Vite 入口 HTML
+├─ package.json                      # 依赖与脚本
+├─ vite.config.ts                    # Vite 配置
+├─ src/
+│  ├─ main.ts                        # Vue 应用入口
+│  ├─ App.vue                        # 根组件
+│  ├─ assets/main.css                # 全局大屏样式
+│  ├─ data/hostSecurity.ts           # 类型、演示数据与数据分组逻辑
+│  └─ components/
+│     ├─ HostSecurityDashboard.vue   # 主大屏组件
+│     └─ dashboard/
+│        ├─ MachineRoomScene.vue     # Three.js 机房场景
+│        ├─ HostTable.vue            # 主机列表表格
+│        ├─ RiskBadge.vue            # 风险等级标识
+│        ├─ MetricIcon.vue           # 指标图标
+│        └─ ControlIcon.vue          # 控制按钮图标
+└─ dist/                             # 构建输出目录
+```
+
+`src/components` 中还保留了 Vue 脚手架生成的 `HelloWorld.vue`、`TheWelcome.vue` 等示例组件，当前主页面没有引用它们，可以在后续清理时移除。
+
+## 5. 数据说明
+
+当前版本使用内置演示数据，数据创建入口在：
+
+```text
+src/data/hostSecurity.ts
+```
+
+主要数据包括：
+
+- 482 台主机资产。
+- 主机 IP、操作系统、业务组、楼层、分区、机柜位置。
+- 主机风险等级、在线状态、CPU、内存、探针状态。
+- 初始安全事件、近 7 天趋势、探针统计和指标对比数据。
+
+如果要接入真实接口，可以在页面初始化时请求后端数据，并将返回值转换成 `hostSecurity.ts` 中定义的 `SecurityModel` 结构后赋给 `HostSecurityDashboard.vue` 中的 `model`。
+
+## 6. 常见问题
+
+### 页面显示为空或中央 3D 区域为空
+
+先确认浏览器支持 WebGL，并开启硬件加速。也可以更新显卡驱动或换用 Chrome / Edge 测试。
+
+### 构建时出现 Node 版本警告
+
+`package.json` 的 `engines` 字段声明了推荐的 Node 版本。如果本机版本较低，npm 可能会输出 `EBADENGINE` 警告；构建仍可能成功，但建议按项目要求升级 Node。
+
+### 页面在小窗口中太小
+
+这是设计稿等比缩放的预期行为。页面内部始终维持 1672 × 941 的布局比例，窗口越大显示越大。
+
+## 7. 开发注意事项
+
+- 不要直接修改 `dist/` 目录，它由 `npm run build` 生成。
+- 新增页面能力时，优先保持 `HostSecurityDashboard.vue` 中的业务状态和 `MachineRoomScene.vue` 中的 3D 渲染职责分离。
+- 修改主机、事件或统计字段时，同步更新 `src/data/hostSecurity.ts` 中的类型定义。
+- 提交前建议执行 `npm run build`，确保类型检查和生产构建都通过。
