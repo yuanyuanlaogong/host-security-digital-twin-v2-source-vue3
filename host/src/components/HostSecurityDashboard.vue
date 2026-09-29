@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import ControlIcon from './dashboard/ControlIcon.vue'
 import HostTable from './dashboard/HostTable.vue'
 import MachineRoomScene from './dashboard/MachineRoomScene.vue'
@@ -15,6 +16,7 @@ import {
   type RoomView,
   type SecurityEvent,
 } from '../data/hostSecurity'
+import { logout } from '../services/auth'
 
 type MetricKey =
   | 'host_total' | 'online_count' | 'offline_count' | 'risk_host_count' | 'open_count'
@@ -52,6 +54,7 @@ const scale = ref(1)
 const toastMessage = ref('')
 const dialog = ref<DialogState | null>(null)
 const dialogRef = ref<HTMLDialogElement>()
+const router = useRouter()
 
 let clockTimer = 0
 let patrolTimer = 0
@@ -304,6 +307,12 @@ function showToast(message: string) {
   toastTimer = window.setTimeout(() => { toastMessage.value = '' }, 2500)
 }
 
+function signOut() {
+  void logout().finally(() => {
+    void router.replace({ name: 'login' })
+  })
+}
+
 function updateClock() {
   const date = new Date()
   clock.value = `${date.toLocaleString('sv-SE').replaceAll('-', '/')} | ${weekdays[date.getDay()]}`
@@ -389,7 +398,10 @@ onBeforeUnmount(() => {
           <p>HOST SECURITY DIGITAL TWIN CENTER</p>
         </div>
         <div class="system">
-          <time>{{ clock }}</time>
+          <div class="system-actions">
+            <time>{{ clock }}</time>
+            <button class="logout-button" type="button" @click="signOut">退出</button>
+          </div>
           <span class="system-health"><i></i>系统运行正常</span>
           <span class="source-badge">演示数据</span>
         </div>
@@ -646,3 +658,19 @@ onBeforeUnmount(() => {
     <div v-if="toastMessage" class="toast" role="status">{{ toastMessage }}</div>
   </main>
 </template>
+
+<style scoped>
+.system-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.logout-button {
+  height: 21px;
+  padding: 0 8px;
+  color: #9fe6ff;
+  font-size: 12px;
+}
+</style>

@@ -578,7 +578,7 @@ h2 {
 
 .room-stat strong {
   display: block;
-  font: 700 25px/32px Consolas, monospace;
+  font: 700 13px/32px Consolas, monospace;
   white-space: nowrap;
   color: var(--tone);
 }
