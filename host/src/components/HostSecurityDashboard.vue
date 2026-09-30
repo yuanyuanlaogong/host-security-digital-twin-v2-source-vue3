@@ -14,9 +14,22 @@ import {
   weekdays,
   type Host,
   type RoomView,
-  type SecurityEvent,
 } from '../data/hostSecurity'
 import { logout } from '../services/auth'
+import {
+  fetchAgentStateSnapshot,
+  fetchHostAssetSnapshot,
+  type AgentStateSnapshot,
+  type HostAssetSnapshot,
+} from '../services/hostAssets'
+import { fetchOrganizations, type Organization } from '../services/organizations'
+import { fetchHostRiskSnapshot, type HostRiskSnapshot } from '../services/statistics'
+import {
+  fetchEventTrend,
+  fetchLatestIntrusionEvents,
+  type EventTrendRow,
+  type RealtimeEvent,
+} from '../services/threatOverview'
 
 type MetricKey =
   | 'host_total' | 'online_count' | 'offline_count' | 'risk_host_count' | 'open_count'
@@ -27,7 +40,6 @@ type IconName = 'chip' | 'layers' | 'host' | 'online' | 'offline' | 'risk' | 'be
 
 interface DialogState {
   title: string
-  event?: SecurityEvent
   hosts?: Host[]
 }
 
@@ -39,6 +51,13 @@ interface RoomStat {
   tone: string
 }
 
+const ASSET_METRIC_KEYS = new Set<MetricKey>([
+  'host_total',
+  'online_count',
+  'offline_count',
+  'risk_host_count',
+])
+
 const model = ref(createDemoModel())
 const view = ref<RoomView>('room')
 const floor = ref('2F')
@@ -47,19 +66,37 @@ const selected = ref('1')
 const paused = ref(false)
 const patrol = ref(false)
 const autoRefresh = ref(true)
-const levelFilter = ref('')
-const typeFilter = ref('')
 const clock = ref('')
 const scale = ref(1)
 const toastMessage = ref('')
 const dialog = ref<DialogState | null>(null)
 const dialogRef = ref<HTMLDialogElement>()
 const router = useRouter()
+const assetSnapshot = ref<HostAssetSnapshot | null>(null)
+const hostRiskSnapshot = ref<HostRiskSnapshot | null>(null)
+const liveAssetData = ref(false)
+const organizations = ref<Organization[]>([])
+const selectedOrgId = ref('')
+const organizationLoading = ref(false)
+const assetLoading = ref(false)
+const hostRiskLoading = ref(false)
+const eventTrendLoading = ref(false)
+const agentStateLoading = ref(false)
+const latestEventsLoading = ref(false)
+const eventTrend = ref<EventTrendRow[] | null>(null)
+const agentStateSnapshot = ref<AgentStateSnapshot | null>(null)
+const latestIntrusionEvents = ref<RealtimeEvent[] | null>(null)
 
 let clockTimer = 0
 let patrolTimer = 0
 let refreshTimer = 0
 let toastTimer = 0
+let organizationRequestId = 0
+let assetRequestId = 0
+let hostRiskRequestId = 0
+let eventTrendRequestId = 0
+let agentStateRequestId = 0
+let latestEventsRequestId = 0
 
 const viewTabs: Array<{ value: RoomView; label: string }> = [
   { value: 'room', label: '实体机房' },
@@ -82,10 +119,10 @@ const metricDefs = [
 const summary = computed(() => {
   const hosts = model.value.hosts
   const result: Record<MetricKey, number | null> = {
-    host_total: hosts.length,
-    online_count: hosts.filter((host) => host.online).length,
-    offline_count: hosts.filter((host) => !host.online).length,
-    risk_host_count: hosts.filter((host) => host.level > 0).length,
+    host_total: assetSnapshot.value?.hostTotal ?? hosts.length,
+    online_count: assetSnapshot.value?.onlineCount ?? hosts.filter((host) => host.online).length,
+    offline_count: assetSnapshot.value?.offlineCount ?? hosts.filter((host) => !host.online).length,
+    risk_host_count: assetSnapshot.value?.riskCount ?? hosts.filter((host) => host.level > 0).length,
     open_count: hosts.reduce((sum, host) => sum + host.open, 0),
     event_today: model.value.summary.event_today ?? null,
     security_score: model.value.summary.security_score ?? null,
@@ -102,7 +139,9 @@ const summary = computed(() => {
 
 const metricRows = computed(() => metricDefs.map((definition) => {
   const value = summary.value[definition.key]
-  const previous = model.value.previous[definition.key] ?? null
+  const previous = liveAssetData.value && ASSET_METRIC_KEYS.has(definition.key)
+    ? null
+    : model.value.previous[definition.key] ?? null
   const delta = value === null || previous === null ? null : value - previous
   const rate = delta === null || !previous ? '—' : `${delta >= 0 ? '+' : ''}${((delta / previous) * 100).toFixed(1)}%`
   return {
@@ -129,7 +168,7 @@ const roomStats = computed<RoomStat[]>(() => {
   return [
     { label: '在线主机', value: `${fmt(summary.value.online_count)} / ${fmt(summary.value.host_total)}`, sub: `在线率 ${pct(summary.value.online_count, summary.value.host_total)}`, icon: 'online', tone: '#3df0ed' },
     { label: '离线主机', value: fmt(summary.value.offline_count), sub: `离线率 ${pct(summary.value.offline_count, summary.value.host_total)}`, icon: 'offline', tone: '#ff627b' },
-    { label: '风险主机', value: fmt(summary.value.risk_host_count), sub: `高危 ${model.value.hosts.filter((host) => host.level === 3).length} | 中危 ${model.value.hosts.filter((host) => host.level === 2).length}`, icon: 'risk', tone: '#ffa756' },
+    { label: '风险主机', value: fmt(summary.value.risk_host_count), sub: `高危 ${fmt(riskCounts.value[3])} | 中危 ${fmt(riskCounts.value[2])}`, icon: 'risk', tone: '#ffa756' },
     { label: '待处理告警', value: fmt(summary.value.open_count), sub: `今日新增 ${fmt(summary.value.event_today)}`, icon: 'bell', tone: '#ff607b' },
     { label: 'CPU 平均使用率', value: `${fmt(summary.value.cpu_avg)}%`, sub: '', icon: 'chip', tone: '#42eeee' },
     { label: '当前区域', value: zone.value === 'all' ? '全部分区' : `${zone.value}区`, sub: `主机数 ${fmt(localLength)}`, icon: 'layers', tone: '#46c7ff' },
@@ -143,6 +182,8 @@ const cpuSparkPoints = computed(() => {
 })
 
 const riskCounts = computed(() => {
+  if (hostRiskSnapshot.value) return hostRiskSnapshot.value.counts
+
   const counts = [0, 0, 0, 0, 0]
   if (model.value.risk_distribution?.length) model.value.risk_distribution.forEach((item) => { counts[item.level] = item.value })
   else model.value.hosts.forEach((host) => { counts[host.level] = (counts[host.level] ?? 0) + 1 })
@@ -163,37 +204,99 @@ const riskArcs = computed(() => {
   })
 })
 
-const osRows = computed(() => distribution('os'))
+const osRows = computed(() => assetSnapshot.value?.osRows ?? distribution('os'))
 const groupRows = computed(() => distribution('group'))
-const rankedHosts = computed(() => model.value.hosts.filter((host) => host.level > 0).sort((a, b) => b.open - a.open || b.level - a.level).slice(0, 5))
-const allRiskHosts = computed(() => model.value.hosts.filter((host) => host.level > 0).sort((a, b) => b.level - a.level || b.open - a.open))
-
-const trendRows = computed(() => model.value.trends)
-const trendMax = computed(() => Math.max(10, Math.ceil(Math.max(...trendRows.value.map((row) => row.value)) / 20) * 20))
-const trendPoints = computed(() => trendRows.value.map((row, index) => ({
-  x: 35 + (index * 285) / Math.max(1, trendRows.value.length - 1),
-  y: 128 - (row.value / trendMax.value) * 100,
-  row,
-})))
-const trendPath = computed(() => trendPoints.value.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' '))
-const trendAreaPath = computed(() => {
-  if (!trendPoints.value.length) return ''
-  const last = trendPoints.value[trendPoints.value.length - 1]
-  if (!last) return ''
-  return `${trendPath.value} L${last.x.toFixed(1)} 128 L35 128 Z`
-})
 
 const agentDefs = [
-  { key: 'agent_online', label: '在线探针', tone: riskColors[0] },
-  { key: 'agent_offline', label: '离线探针', tone: riskColors[4] },
-  { key: 'agent_upgrading', label: '升级中', tone: riskColors[3] },
-  { key: 'agent_version_error', label: '版本异常', tone: riskColors[4] },
+  { key: 'online', label: '在线探针', tone: riskColors[0] },
+  { key: 'offline', label: '离线探针', tone: riskColors[4] },
+  { key: 'abnormal', label: '异常探针', tone: riskColors[3] },
+  { key: 'old_version', label: '旧版探针', tone: riskColors[4] },
 ] as const
-const agentTotal = computed(() => agentDefs.reduce((sum, definition) => sum + (summary.value[definition.key] ?? 0), 0))
 
-const eventTypes = computed(() => [...new Set(model.value.events.map((event) => event.event_type))])
-const filteredEvents = computed(() => model.value.events.filter((event) => (!levelFilter.value || event.level === Number(levelFilter.value)) && (!typeFilter.value || event.event_type === typeFilter.value)))
-const dialogEvent = computed(() => dialog.value?.event ?? null)
+const alarmTrendRows = computed(() => eventTrend.value?.slice(-7) ?? model.value.trends)
+const alarmTrendMax = computed(() => {
+  const maxValue = alarmTrendRows.value.reduce((max, row) => Math.max(max, row.value), 0)
+  return Math.max(10, Math.ceil(maxValue / 20) * 20)
+})
+const alarmTrendPoints = computed(() => alarmTrendRows.value.map((row, index) => ({
+  x: 35 + (index * 285) / Math.max(1, alarmTrendRows.value.length - 1),
+  y: 128 - (row.value / alarmTrendMax.value) * 100,
+  row,
+})))
+const alarmTrendPath = computed(() => alarmTrendPoints.value.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' '))
+const alarmTrendAreaPath = computed(() => {
+  if (!alarmTrendPoints.value.length) return ''
+  const last = alarmTrendPoints.value[alarmTrendPoints.value.length - 1]
+  if (!last) return ''
+  return `${alarmTrendPath.value} L${last.x.toFixed(1)} 128 L35 128 Z`
+})
+
+const intrusionTrendRows = computed(() => {
+  if (eventTrend.value) return eventTrend.value
+
+  const demoRows = model.value.trends
+  const now = new Date()
+  return Array.from({ length: 30 }, (_, index) => {
+    const date = new Date(now)
+    date.setDate(date.getDate() - (29 - index))
+    return {
+      label: date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
+      value: demoRows[index % Math.max(1, demoRows.length)]?.value ?? 0,
+    }
+  })
+})
+const intrusionTrendTotal = computed(() => intrusionTrendRows.value.reduce((sum, row) => sum + row.value, 0))
+const intrusionTrendBars = computed(() => {
+  const maxValue = Math.max(1, ...intrusionTrendRows.value.map((row) => row.value))
+  const gap = 3
+  const barWidth = (329 - gap * 29) / 30
+  return intrusionTrendRows.value.map((row, index) => {
+    const height = Math.max(1, (row.value / maxValue) * 95)
+    return {
+      ...row,
+      height,
+      width: barWidth,
+      x: 8 + index * (barWidth + gap),
+      y: 124 - height,
+    }
+  })
+})
+
+const agentStateRows = computed(() => agentDefs.map((definition) => {
+  if (!agentStateSnapshot.value) {
+    const fallbackKeys = {
+      online: 'agent_online',
+      offline: 'agent_offline',
+      abnormal: 'agent_upgrading',
+      old_version: 'agent_version_error',
+    } as const
+    return { ...definition, value: summary.value[fallbackKeys[definition.key]] ?? 0 }
+  }
+
+  const snapshot = agentStateSnapshot.value
+  const value = definition.key === 'old_version'
+    ? snapshot.oldVersionCount
+    : definition.key === 'abnormal'
+      ? Object.entries(snapshot.stateCounts)
+        .filter(([state]) => state !== 'online' && state !== 'offline')
+        .reduce((sum, [, value]) => sum + value, 0)
+      : snapshot.stateCounts[definition.key] ?? 0
+  return { ...definition, value }
+}))
+const agentStateTotal = computed(() => {
+  if (!agentStateSnapshot.value) return agentStateRows.value.reduce((sum, row) => sum + row.value, 0)
+  return Object.values(agentStateSnapshot.value.stateCounts).reduce((sum, value) => sum + value, 0)
+})
+const realtimeEventRows = computed(() => latestIntrusionEvents.value ?? model.value.events.slice(0, 100).map((event) => ({
+  id: event.id,
+  ip: event.host_ip,
+  level: event.level,
+  eventType: event.event_type,
+  description: event.description,
+  state: event.state,
+  occurredAt: event.occurred_at,
+})))
 
 const screenStyle = computed(() => ({ width: `${1672 * scale.value}px`, height: `${941 * scale.value}px` }))
 const dashboardStyle = computed(() => ({ transform: `scale(${scale.value})` }))
@@ -219,6 +322,10 @@ function stamp(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('sv-SE')
 }
 
+function eventStateText(state: number) {
+  return ({ 1: '有风险', 2: '已忽略', 3: '已处理' } as Record<number, string>)[state] ?? '未知'
+}
+
 function bound(value: unknown, max = 100) {
   return Math.max(0, Math.min(max, number(value) ?? 0))
 }
@@ -238,10 +345,6 @@ function barWidth(value: number, rows: Array<{ value: number }>) {
 
 function barSymbol(name: string) {
   return ({ Linux: 'Lx', Windows: 'Wi', CentOS: 'Ce', Ubuntu: 'Ub', Other: 'Ot' } as Record<string, string>)[name] ?? 'Ht'
-}
-
-function eventState(state: number) {
-  return ({ 1: '待处理', 2: '已忽略', 3: '已处理' } as Record<number, string>)[state] ?? '未知'
 }
 
 function selectHost(id: string, closeDialog = false) {
@@ -287,10 +390,6 @@ function nextZone() {
   changeLocation()
 }
 
-function showEvent(event: SecurityEvent) {
-  dialog.value = { title: '安全事件详情', event }
-}
-
 function showHosts(title: string, hosts: Host[]) {
   dialog.value = { title, hosts }
 }
@@ -305,6 +404,110 @@ function showToast(message: string) {
   toastMessage.value = message
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => { toastMessage.value = '' }, 2500)
+}
+
+async function loadHostAssets() {
+  const requestId = ++assetRequestId
+  assetLoading.value = true
+
+  try {
+    const snapshot = await fetchHostAssetSnapshot(selectedOrgId.value)
+    if (requestId !== assetRequestId) return
+    assetSnapshot.value = snapshot
+    liveAssetData.value = true
+  } catch {
+    if (requestId !== assetRequestId) return
+    assetSnapshot.value = null
+    liveAssetData.value = false
+    showToast('主机资产数据加载失败，当前展示演示数据')
+  } finally {
+    if (requestId === assetRequestId) assetLoading.value = false
+  }
+}
+
+async function loadOrganizations() {
+  const requestId = ++organizationRequestId
+  organizationLoading.value = true
+
+  try {
+    const rows = await fetchOrganizations()
+    if (requestId !== organizationRequestId) return
+    organizations.value = rows
+  } catch {
+    if (requestId !== organizationRequestId) return
+    organizations.value = []
+    showToast('机构列表加载失败')
+  } finally {
+    if (requestId === organizationRequestId) organizationLoading.value = false
+  }
+}
+
+async function loadHostRisk() {
+  const requestId = ++hostRiskRequestId
+  hostRiskLoading.value = true
+
+  try {
+    const snapshot = await fetchHostRiskSnapshot(selectedOrgId.value)
+    if (requestId !== hostRiskRequestId) return
+    hostRiskSnapshot.value = snapshot
+  } catch {
+    if (requestId !== hostRiskRequestId) return
+    hostRiskSnapshot.value = null
+    showToast('主机风险分布加载失败，当前展示演示数据')
+  } finally {
+    if (requestId === hostRiskRequestId) hostRiskLoading.value = false
+  }
+}
+
+async function loadEventTrend() {
+  const requestId = ++eventTrendRequestId
+  eventTrendLoading.value = true
+
+  try {
+    const rows = await fetchEventTrend(selectedOrgId.value, 30)
+    if (requestId !== eventTrendRequestId) return
+    eventTrend.value = rows
+  } catch {
+    if (requestId !== eventTrendRequestId) return
+    eventTrend.value = null
+    showToast('告警发生趋势加载失败，当前展示演示数据')
+  } finally {
+    if (requestId === eventTrendRequestId) eventTrendLoading.value = false
+  }
+}
+
+async function loadAgentState() {
+  const requestId = ++agentStateRequestId
+  agentStateLoading.value = true
+
+  try {
+    const snapshot = await fetchAgentStateSnapshot(selectedOrgId.value)
+    if (requestId !== agentStateRequestId) return
+    agentStateSnapshot.value = snapshot
+  } catch {
+    if (requestId !== agentStateRequestId) return
+    agentStateSnapshot.value = null
+    showToast('探针状态加载失败，当前展示演示数据')
+  } finally {
+    if (requestId === agentStateRequestId) agentStateLoading.value = false
+  }
+}
+
+async function loadLatestEvents() {
+  const requestId = ++latestEventsRequestId
+  latestEventsLoading.value = true
+
+  try {
+    const events = await fetchLatestIntrusionEvents(selectedOrgId.value, 100)
+    if (requestId !== latestEventsRequestId) return
+    latestIntrusionEvents.value = events
+  } catch {
+    if (requestId !== latestEventsRequestId) return
+    latestIntrusionEvents.value = null
+    showToast('最新入侵事件加载失败，当前展示演示数据')
+  } finally {
+    if (requestId === latestEventsRequestId) latestEventsLoading.value = false
+  }
 }
 
 function signOut() {
@@ -334,9 +537,23 @@ watch(floor, (next) => {
   void next
 })
 
+watch(selectedOrgId, () => {
+  void loadHostAssets()
+  void loadHostRisk()
+  void loadEventTrend()
+  void loadAgentState()
+  void loadLatestEvents()
+})
+
 onMounted(() => {
   updateClock()
   updateScale()
+  void loadOrganizations()
+  void loadHostAssets()
+  void loadHostRisk()
+  void loadEventTrend()
+  void loadAgentState()
+  void loadLatestEvents()
   window.addEventListener('resize', updateScale)
   clockTimer = window.setInterval(updateClock, 1000)
   patrolTimer = window.setInterval(() => {
@@ -350,23 +567,8 @@ onMounted(() => {
   }, 4000)
   refreshTimer = window.setInterval(() => {
     if (paused.value || !autoRefresh.value) return
-    const host = model.value.hosts[0]
-    if (!host) return
-    model.value.summary.event_today = (model.value.summary.event_today ?? 0) + 1
-    model.value.summary.open_count = (model.value.summary.open_count ?? 0) + 1
-    host.open += 1
-    model.value.events.unshift({
-      id: `demo-${Date.now()}`,
-      occurred_at: new Date().toISOString(),
-      host_name: host.name,
-      host_ip: host.ip,
-      event_type: '异常登录',
-      level: 3,
-      description: '演示：检测到新增异常登录告警',
-      state: 1,
-    })
-    model.value.events = model.value.events.slice(0, 100)
-    model.value.updated_at = new Date().toISOString()
+    void loadEventTrend()
+    void loadLatestEvents()
   }, 18000)
 })
 
@@ -402,8 +604,6 @@ onBeforeUnmount(() => {
             <time>{{ clock }}</time>
             <button class="logout-button" type="button" @click="signOut">退出</button>
           </div>
-          <span class="system-health"><i></i>系统运行正常</span>
-          <span class="source-badge">演示数据</span>
         </div>
       </header>
 
@@ -426,7 +626,7 @@ onBeforeUnmount(() => {
       <div class="workspace">
         <aside class="column left-column">
           <section class="panel">
-            <h2>主机风险分布 <small>{{ fmt(riskTotal) }} 台</small></h2>
+            <h2>主机风险分布 <small>{{ hostRiskLoading ? '加载中' : `${fmt(riskTotal)} 台` }}</small></h2>
             <div class="risk-chart">
               <svg class="donut" viewBox="0 0 160 160" role="img" :aria-label="`风险主机 ${riskTotal} 台`">
                 <circle cx="80" cy="80" r="65" fill="none" stroke="#10364f" stroke-width="15" />
@@ -451,9 +651,9 @@ onBeforeUnmount(() => {
           <section class="panel">
             <h2>操作系统分布</h2>
             <div class="bar-chart">
-              <div v-for="row in osRows" :key="row.name" class="bar-row">
+              <div v-for="row in osRows" :key="row.name" class="bar-row os-bar-row">
                 <span class="bar-symbol">{{ barSymbol(row.name) }}</span>
-                <span :title="row.name">{{ row.name }}</span>
+                <span class="bar-name" :title="row.name">{{ row.name }}</span>
                 <div class="bar-track"><div class="bar-fill" :style="{ width: `${barWidth(row.value, osRows)}%` }" /></div>
                 <span class="bar-value">{{ fmt(row.value) }} <small>({{ pct(row.value, osRows.reduce((sum, item) => sum + item.value, 0)) }})</small></span>
               </div>
@@ -480,7 +680,21 @@ onBeforeUnmount(() => {
             </button>
           </nav>
 
-          <div class="room-metrics">
+          <label class="org-picker" for="organization-select">
+            <!-- <span>机构</span> -->
+            <select
+              id="organization-select"
+              v-model="selectedOrgId"
+              :disabled="organizationLoading"
+            >
+              <option value="">全部机构</option>
+              <option v-for="org in organizations" :key="org.id" :value="org.id">
+                {{ org.name }}
+              </option>
+            </select>
+          </label>
+
+          <!-- <div class="room-metrics">
             <div v-for="stat in roomStats" :key="stat.label" class="room-stat" :style="{ '--tone': stat.tone }">
               <MetricIcon :name="stat.icon" />
               <span>{{ stat.label }}</span>
@@ -490,7 +704,7 @@ onBeforeUnmount(() => {
                 <polyline :points="cpuSparkPoints" fill="none" stroke="#53eff2" />
               </svg>
             </div>
-          </div>
+          </div> -->
 
           <div class="scene-wrap">
             <MachineRoomScene
@@ -543,7 +757,7 @@ onBeforeUnmount(() => {
 
         <aside class="column right-column">
           <section class="panel">
-            <h2>告警发生趋势 <small>近 7 天</small></h2>
+            <h2>告警发生趋势 <small>{{ eventTrendLoading ? '加载中' : '近 7 天' }}</small></h2>
             <div class="trend-chart">
               <svg viewBox="0 0 345 164" role="img" aria-label="告警趋势">
                 <defs>
@@ -553,10 +767,10 @@ onBeforeUnmount(() => {
                   </linearGradient>
                 </defs>
                 <path v-for="index in 5" :key="index" :d="`M35 ${128 - (index - 1) * 25}H325`" stroke="#19516b" stroke-dasharray="3 4" />
-                <text v-for="index in 5" :key="`text-${index}`" x="5" :y="132 - (index - 1) * 25">{{ fmt((trendMax * (index - 1)) / 4) }}</text>
-                <path :d="trendAreaPath" fill="url(#trendFade)" />
-                <path class="line" :d="trendPath" />
-                <template v-for="point in trendPoints" :key="point.row.label">
+                <text v-for="index in 5" :key="`text-${index}`" x="5" :y="132 - (index - 1) * 25">{{ fmt((alarmTrendMax * (index - 1)) / 4) }}</text>
+                <path :d="alarmTrendAreaPath" fill="url(#trendFade)" />
+                <path class="line" :d="alarmTrendPath" />
+                <template v-for="point in alarmTrendPoints" :key="point.row.label">
                   <circle class="point" :cx="point.x" :cy="point.y" r="3"><title>{{ point.row.label }}：{{ point.row.value }}</title></circle>
                   <text text-anchor="middle" :x="point.x" :y="point.y - 10">{{ fmt(point.row.value) }}</text>
                   <text text-anchor="middle" :x="point.x" y="151">{{ point.row.label }}</text>
@@ -566,17 +780,36 @@ onBeforeUnmount(() => {
           </section>
 
           <section class="panel">
-            <h2>高风险主机 TOP 5 <button class="text-button" type="button" @click="showHosts('风险主机列表', allRiskHosts)">更多 ›</button></h2>
-            <HostTable :hosts="rankedHosts" @select="id => selectHost(id, true)" />
+            <h2>30天内入侵事件 <small>{{ eventTrendLoading ? '加载中' : `${fmt(intrusionTrendTotal)} 起` }}</small></h2>
+            <div class="intrusion-trend-chart">
+              <svg viewBox="0 0 345 164" role="img" :aria-label="`30天内入侵事件 ${intrusionTrendTotal} 起`">
+                <line class="axis" x1="8" y1="124.5" x2="337" y2="124.5" />
+                <g v-for="(bar, index) in intrusionTrendBars" :key="`${bar.label}-${index}`">
+                  <rect
+                    class="bar"
+                    :class="{ latest: index === intrusionTrendBars.length - 1 }"
+                    :height="bar.height"
+                    :width="bar.width"
+                    :x="bar.x"
+                    :y="bar.y"
+                  >
+                    <title>{{ bar.label }}：{{ bar.value }} 起</title>
+                  </rect>
+                  <text v-if="index % 5 === 0" text-anchor="middle" :x="bar.x + bar.width / 2" y="143">
+                    {{ bar.label }}
+                  </text>
+                </g>
+              </svg>
+            </div>
           </section>
 
           <section class="panel">
-            <h2>探针状态</h2>
+            <h2>探针状态 <small>{{ agentStateLoading ? '加载中' : '' }}</small></h2>
             <div class="agent-grid">
-              <div v-for="agent in agentDefs" :key="agent.key" class="agent-box" :style="{ '--tone': agent.tone }">
+              <div v-for="agent in agentStateRows" :key="agent.key" class="agent-box" :style="{ '--tone': agent.tone }">
                 <span>{{ agent.label }}</span>
-                <strong>{{ fmt(summary[agent.key]) }}</strong>
-                <small>{{ pct(summary[agent.key], agentTotal) }}</small>
+                <strong>{{ fmt(agent.value) }}</strong>
+                <small>{{ pct(agent.value, agentStateTotal) }}</small>
               </div>
             </div>
           </section>
@@ -585,22 +818,8 @@ onBeforeUnmount(() => {
 
       <section class="panel events-panel">
         <div class="event-heading">
-          <h2>实时安全事件流 <small>{{ filteredEvents.length }} 条</small></h2>
+          <h2>实时安全事件流 <small>{{ latestEventsLoading ? '加载中' : `${realtimeEventRows.length} 条` }}</small></h2>
           <div class="event-controls">
-            <label>
-              <span class="sr-only">风险等级</span>
-              <select v-model="levelFilter">
-                <option value="">全部等级</option>
-                <option v-for="level in [4, 3, 2, 1, 0]" :key="level" :value="String(level)">{{ riskLevels[level] }}</option>
-              </select>
-            </label>
-            <label>
-              <span class="sr-only">事件类型</span>
-              <select v-model="typeFilter">
-                <option value="">全部类型</option>
-                <option v-for="type in eventTypes" :key="type" :value="type">{{ type }}</option>
-              </select>
-            </label>
             <label class="toggle"><input v-model="autoRefresh" type="checkbox">自动刷新</label>
             <button type="button" :aria-pressed="paused" :aria-label="paused ? '恢复动画' : '暂停动画'" @click="paused = !paused">{{ paused ? '▶' : 'Ⅱ' }}</button>
           </div>
@@ -609,21 +828,19 @@ onBeforeUnmount(() => {
           <table>
             <thead>
               <tr>
-                <th>发生时间</th><th>主机名称</th><th>IP 地址</th><th>事件类型</th><th>风险等级</th><th>事件描述</th><th>处理状态</th><th>操作</th>
+                <th>IP地址</th><th>风险等级</th><th>事件类型</th><th>事件详情</th><th>处置状态</th><th>时间</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="event in filteredEvents" :key="event.id">
-                <td>{{ stamp(event.occurred_at) }}</td>
-                <td>{{ event.host_name }}</td>
-                <td>{{ event.host_ip }}</td>
-                <td>{{ event.event_type }}</td>
+              <tr v-for="event in realtimeEventRows" :key="event.id">
+                <td>{{ event.ip }}</td>
                 <td><RiskBadge :level="event.level" /></td>
-                <td>{{ event.description }}</td>
-                <td :class="event.state === 1 ? 'status-open' : 'status-done'">{{ eventState(event.state) }}</td>
-                <td><button class="text-button" type="button" @click="showEvent(event)">详情</button></td>
+                <td :title="event.eventType">{{ event.eventType }}</td>
+                <td class="event-description" :title="event.description">{{ event.description }}</td>
+                <td :class="event.state === 1 ? 'status-open' : 'status-done'">{{ eventStateText(event.state) }}</td>
+                <td>{{ stamp(event.occurredAt) }}</td>
               </tr>
-              <tr v-if="!filteredEvents.length"><td class="empty" colspan="8">没有符合筛选条件的事件</td></tr>
+              <tr v-if="!realtimeEventRows.length"><td class="empty" colspan="6">暂无安全事件</td></tr>
             </tbody>
           </table>
         </div>
@@ -637,19 +854,7 @@ onBeforeUnmount(() => {
 
     <dialog ref="dialogRef" @close="dialog = null">
       <form method="dialog"><button class="dialog-close" type="submit" aria-label="关闭">×</button></form>
-      <div v-if="dialogEvent">
-        <h2>{{ dialog?.title }}</h2>
-        <dl>
-          <dt>发生时间</dt><dd>{{ stamp(dialogEvent.occurred_at) }}</dd>
-          <dt>主机名称</dt><dd>{{ dialogEvent.host_name }}</dd>
-          <dt>IP 地址</dt><dd>{{ dialogEvent.host_ip }}</dd>
-          <dt>事件类型</dt><dd>{{ dialogEvent.event_type }}</dd>
-          <dt>风险等级</dt><dd>{{ riskLevels[dialogEvent.level] }}</dd>
-          <dt>事件描述</dt><dd>{{ dialogEvent.description }}</dd>
-          <dt>处理状态</dt><dd>{{ eventState(dialogEvent.state) }}</dd>
-        </dl>
-      </div>
-      <div v-else-if="dialog?.hosts" class="dialog-table">
+      <div v-if="dialog?.hosts" class="dialog-table">
         <h2>{{ dialog?.title }}</h2>
         <div class="table-scroll"><HostTable :hosts="dialog.hosts" @select="id => selectHost(id, true)" /></div>
       </div>
@@ -665,6 +870,79 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.intrusion-trend-chart {
+  padding: 5px 8px 0;
+}
+
+.intrusion-trend-chart svg {
+  width: 323px;
+  height: 164px;
+}
+
+.intrusion-trend-chart text {
+  fill: #d9ecfb;
+  font: 10px Consolas, monospace;
+}
+
+.intrusion-trend-chart .axis {
+  stroke: #19516b;
+}
+
+.intrusion-trend-chart .bar {
+  fill: #28a7cf;
+  fill-opacity: 0.85;
+}
+
+.intrusion-trend-chart .bar:hover {
+  fill: #4ae0f8;
+  fill-opacity: 1;
+}
+
+.intrusion-trend-chart .bar.latest {
+  fill: #ffbe66;
+}
+
+.org-picker {
+  position: absolute;
+  z-index: 8;
+  left: 9px;
+  top: 48px;
+  width: 168px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #8ad7ef;
+}
+
+.org-picker span {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.org-picker select {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+.org-picker select option {
+  background-color: #062238;
+  color: #d9ecfb;
+}
+
+.org-picker select option:checked {
+  background-color: #0d5f7d;
+  color: #fff;
+}
+
+.org-picker select:disabled {
+  cursor: progress;
+  opacity: 0.65;
 }
 
 .logout-button {

@@ -462,6 +462,7 @@ h2 {
   padding: 9px 16px;
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .bar-row {
@@ -473,8 +474,16 @@ h2 {
   font-size: 13px;
 }
 
-.left-column .panel:nth-child(3) .bar-row {
-  grid-template-columns: 39px 89px 94px 1fr;
+.os-bar-row {
+  grid-template-columns: 30px minmax(0, 1fr) 78px 80px;
+  gap: 6px;
+}
+
+.bar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bar-symbol {
@@ -610,7 +619,7 @@ h2 {
 .scene-wrap {
   position: absolute;
   left: 0;
-  top: 147px;
+  top: 75px;
   width: 928px;
   height: 431px;
   background: #041b2d;
@@ -1113,14 +1122,12 @@ tbody tr:hover {
   font-size: 13px;
 }
 
-.events-panel th:nth-child(1) { width: 192px; }
-.events-panel th:nth-child(2) { width: 184px; }
-.events-panel th:nth-child(3) { width: 162px; }
-.events-panel th:nth-child(4) { width: 203px; }
-.events-panel th:nth-child(5) { width: 145px; }
-.events-panel th:nth-child(6) { width: 478px; }
-.events-panel th:nth-child(7) { width: 166px; }
-.events-panel th:nth-child(8) { width: 87px; }
+.events-panel th:nth-child(1) { width: 180px; }
+.events-panel th:nth-child(2) { width: 110px; }
+.events-panel th:nth-child(3) { width: 170px; }
+.events-panel th:nth-child(4) { width: auto; }
+.events-panel th:nth-child(5) { width: 110px; }
+.events-panel th:nth-child(6) { width: 200px; }
 
 .events-panel td:first-child::before {
   content: '◆';

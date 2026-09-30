@@ -20,6 +20,10 @@ interface JsonRpcResponseBody<T> {
   error?: JsonRpcErrorBody
 }
 
+export interface RpcCallOptions {
+  orgId?: string
+}
+
 const RPC_ENDPOINT = '/rpc'
 const SESSION_TOKEN_KEY = 'Session-Token'
 
@@ -39,13 +43,18 @@ export function setSessionToken(token: string): void {
   else sessionStorage.removeItem(SESSION_TOKEN_KEY)
 }
 
-export async function rpcCall<T = unknown>(method: string, params?: unknown): Promise<T> {
+export async function rpcCall<T = unknown>(
+  method: string,
+  params?: unknown,
+  options?: RpcCallOptions
+): Promise<T> {
   const response = await fetch(RPC_ENDPOINT, {
     method: 'POST',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...(getSessionToken() ? { 'Session-Token': getSessionToken() } : {}),
+      ...(options?.orgId ? { 'X-CW-OID': options.orgId } : {}),
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
